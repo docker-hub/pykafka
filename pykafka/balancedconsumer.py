@@ -18,6 +18,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 __all__ = ["BalancedConsumer"]
+import atexit
 import itertools
 import logging
 import socket
@@ -186,6 +187,12 @@ class BalancedConsumer():
         if auto_start is True:
             self.start()
 
+        # Register a cleanup handler
+        def cleanup(obj):
+            obj.stop()
+        self._cleanup_func = cleanup
+        atexit.register(cleanup, self)
+
     def __repr__(self):
         return "<{module}.{name} at {id_} (consumer_group={group})>".format(
             module=self.__class__.__module__,
@@ -247,7 +254,8 @@ class BalancedConsumer():
             # rebalance that is already underway might re-register the zk
             # nodes that we remove here
             self._running = False
-        self._consumer.stop()
+        if self._consumer:
+            self._consumer.stop()
         if self._owns_zookeeper:
             # NB this should always come last, so we do not hand over control
             # of our partitions until consumption has really been halted
@@ -258,6 +266,21 @@ class BalancedConsumer():
             # additionally we'd want to remove watches here, but there are no
             # facilities for that in ChildrenWatch - as a workaround we check
             # self._running in the watcher callbacks (see further down)
+
+        if hasattr(self, '_cleanup_func'):
+            # Remove cleanup handler now that we've stopped
+            try:
+                # py3 supports unregistering
+                if hasattr(atexit, 'unregister'):
+                    atexit.unregister(self._cleanup_func) # pylint: disable=no-member
+                # py2 requires removing from private attribute...
+                else:
+                    # ValueError on list.remove() if the exithandler no longer exists
+                    # but that is fine here
+                    atexit._exithandlers.remove((self._cleanup_func, (self,), {}))
+            except ValueError:
+                pass
+            del self._cleanup_func
 
     def _setup_zookeeper(self, zookeeper_connect, timeout):
         """Open a connection to a ZooKeeper host.

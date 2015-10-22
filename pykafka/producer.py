@@ -19,6 +19,7 @@ limitations under the License.
 """
 __all__ = ["Producer"]
 from collections import deque
+import atexit
 import itertools
 import logging
 import sys
@@ -140,6 +141,13 @@ class Producer(object):
         self._update_lock = self._cluster.handler.Lock()
         self.start()
 
+        # Register a cleanup handler
+        def cleanup(obj):
+            if obj._running:
+                obj.stop()
+        self._cleanup_func = cleanup
+        atexit.register(cleanup, self)
+
     def _raise_worker_exceptions(self):
         """Raises exceptions encountered on worker threads"""
         if self._worker_exception is not None:
@@ -220,6 +228,21 @@ class Producer(object):
         if self._owned_brokers is not None:
             for owned_broker in self._owned_brokers.values():
                 owned_broker.stop()
+
+        if hasattr(self, '_cleanup_func'):
+            # Remove cleanup handler now that we've stopped
+            try:
+                # py3 supports unregistering
+                if hasattr(atexit, 'unregister'):
+                    atexit.unregister(self._cleanup_func) # pylint: disable=no-member
+                # py2 requires removing from private attribute...
+                else:
+                    # ValueError on list.remove() if the exithandler no longer exists
+                    # but that is fine here
+                    atexit._exithandlers.remove((self._cleanup_func, (self,), {}))
+            except ValueError:
+                pass
+            del self._cleanup_func
 
     def produce(self, message, partition_key=None):
         """Produce a message.
